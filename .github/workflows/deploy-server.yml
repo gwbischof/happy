@@ -65,6 +65,20 @@ jobs:
     environment: deployment
 
     steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Copy docker-compose to server
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          source: "packages/happy-server/deploy/docker-compose.yaml"
+          target: "~/happy"
+          strip_components: 3
+
       - name: Deploy to server
         uses: appleboy/ssh-action@v1.0.3
         with:
@@ -74,91 +88,43 @@ jobs:
           port: ${{ secrets.DEPLOY_PORT || 22 }}
           script: |
             set -e
-
-            # Configuration (set these secrets in GitHub)
-            CONTAINER_NAME="happy-server"
-            IMAGE_NAME="${{ needs.build-and-push.outputs.image }}"
-            NETWORK="${{ secrets.DOCKER_NETWORK }}"
-            API_DOMAIN="${{ secrets.API_DOMAIN }}"
-            S3_DOMAIN="${{ secrets.S3_DOMAIN }}"
+            cd ~/happy
 
             echo "🚀 Starting deployment of Happy Server..."
 
             # Login to GitHub Container Registry
             echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
 
-            # Pull the latest image
-            echo "⬇️ Pulling latest image..."
-            docker pull "$IMAGE_NAME"
+            # Create .env file
+            cat > .env << 'EOF'
+            SERVER_IMAGE=${{ needs.build-and-push.outputs.image }}
+            API_DOMAIN=${{ secrets.API_DOMAIN }}
+            S3_DOMAIN=${{ secrets.S3_DOMAIN }}
+            S3_PUBLIC_URL=https://${{ secrets.S3_DOMAIN }}/happy
+            POSTGRES_PASSWORD=${{ secrets.POSTGRES_PASSWORD }}
+            HANDY_MASTER_SECRET=${{ secrets.HANDY_MASTER_SECRET }}
+            S3_ACCESS_KEY=${{ secrets.S3_ACCESS_KEY }}
+            S3_SECRET_KEY=${{ secrets.S3_SECRET_KEY }}
+            TRAEFIK_NETWORK=${{ secrets.DOCKER_NETWORK }}
+            EOF
 
-            # Stop existing container if running
-            if docker ps --format "table {{.Names}}" | grep -q "^${CONTAINER_NAME}$"; then
-              echo "⏹️ Stopping existing container..."
-              docker stop "$CONTAINER_NAME"
-            fi
+            # Pull and deploy (--no-build ensures we use the pre-built image from ghcr.io)
+            echo "⬇️ Pulling images..."
+            docker compose pull
 
-            # Remove existing container if it exists
-            if docker ps -a --format "table {{.Names}}" | grep -q "^${CONTAINER_NAME}$"; then
-              echo "🗑️ Removing existing container..."
-              docker rm "$CONTAINER_NAME"
-            fi
+            echo "🔄 Starting services..."
+            docker compose up -d --no-build
 
-            # Database connection (postgres/redis hostnames are Docker service names)
-            DATABASE_URL="postgresql://postgres:${{ secrets.POSTGRES_PASSWORD }}@postgres:5432/handy"
-            REDIS_URL="redis://redis:6379"
-
-            # Run database migrations
-            echo "🔄 Running database migrations..."
-            docker run --rm \
-              --network "$NETWORK" \
-              -e DATABASE_URL="$DATABASE_URL" \
-              "$IMAGE_NAME" \
-              npx prisma migrate deploy --schema=/repo/packages/happy-server/prisma/schema.prisma
-
-            # Run the new container
-            echo "🔄 Starting new container..."
-            docker run -d \
-              --name "$CONTAINER_NAME" \
-              --restart unless-stopped \
-              --network "$NETWORK" \
-              -e DATABASE_URL="$DATABASE_URL" \
-              -e REDIS_URL="$REDIS_URL" \
-              -e HANDY_MASTER_SECRET="${{ secrets.HANDY_MASTER_SECRET }}" \
-              -e S3_HOST="minio" \
-              -e S3_PORT="9000" \
-              -e S3_USE_SSL="false" \
-              -e S3_ACCESS_KEY="${{ secrets.S3_ACCESS_KEY }}" \
-              -e S3_SECRET_KEY="${{ secrets.S3_SECRET_KEY }}" \
-              -e S3_BUCKET="happy" \
-              -e S3_PUBLIC_URL="https://$S3_DOMAIN/happy" \
-              -e NODE_ENV=production \
-              -l "traefik.enable=true" \
-              -l "traefik.http.routers.happy-api.rule=Host(\`$API_DOMAIN\`)" \
-              -l "traefik.http.routers.happy-api.tls=true" \
-              -l "traefik.http.routers.happy-api.tls.certresolver=letsencrypt" \
-              -l "traefik.http.services.happy-api.loadbalancer.server.port=3000" \
-              "$IMAGE_NAME"
-
-            # Wait for container to be ready
-            echo "⏳ Waiting for container to be ready..."
+            # Wait for services to be ready
+            echo "⏳ Waiting for services to be ready..."
             sleep 15
 
-            # Check if container is running
-            if docker ps --format "table {{.Names}}" | grep -q "^${CONTAINER_NAME}$"; then
-              echo "✅ Container is running!"
+            # Check status
+            echo "📋 Service status:"
+            docker compose ps
 
-              # Show recent logs
-              echo "📋 Recent logs:"
-              docker logs --tail 20 "$CONTAINER_NAME"
-            else
-              echo "❌ Container failed to start!"
-              docker logs "$CONTAINER_NAME"
-              exit 1
-            fi
+            echo "📋 Server logs:"
+            docker compose logs --tail 20 server
 
-            # Clean up old images
-            echo "🧹 Cleaning up old images..."
-            docker image prune -af --filter "until=24h"
-
-            echo "🎉 Deployment completed successfully!"
-            echo "📍 API available at: https://$API_DOMAIN"
+            echo "🎉 Deployment completed!"
+            echo "📍 API available at: https://${{ secrets.API_DOMAIN }}"
