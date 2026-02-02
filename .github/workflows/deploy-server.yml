@@ -96,8 +96,8 @@ jobs:
             echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
 
             # Create .env file
-            cat > .env << 'EOF'
-            SERVER_IMAGE=${{ needs.build-and-push.outputs.image }}
+            cat > .env <<EOF
+            SERVER_IMAGE=${{ secrets.SERVER_IMAGE }}
             API_DOMAIN=${{ secrets.API_DOMAIN }}
             S3_DOMAIN=${{ secrets.S3_DOMAIN }}
             S3_PUBLIC_URL=https://${{ secrets.S3_DOMAIN }}/happy
@@ -107,6 +107,7 @@ jobs:
             S3_SECRET_KEY=${{ secrets.S3_SECRET_KEY }}
             TRAEFIK_NETWORK=${{ secrets.DOCKER_NETWORK }}
             EOF
+            sed -i 's/^[[:space:]]*//' .env
 
             # Pull and deploy (--no-build ensures we use the pre-built image from ghcr.io)
             echo "⬇️ Pulling images..."

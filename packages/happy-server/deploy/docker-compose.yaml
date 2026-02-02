@@ -87,7 +87,7 @@ services:
       - internal
 
   migrate:
-    image: ${SERVER_IMAGE:-ghcr.io/slopus/happy/happy-server:latest}
+    image: ${SERVER_IMAGE:-happy-server:local}
     build:
       context: ../../..
       dockerfile: Dockerfile.server
@@ -101,7 +101,7 @@ services:
       - internal
 
   server:
-    image: ${SERVER_IMAGE:-ghcr.io/slopus/happy/happy-server:latest}
+    image: ${SERVER_IMAGE:-happy-server:local}
     build:
       context: ../../..
       dockerfile: Dockerfile.server
