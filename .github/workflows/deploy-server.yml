@@ -1,0 +1,131 @@
+name: Deploy Server
+
+on:
+  push:
+    branches: [main, prod]
+    paths:
+      - 'packages/happy-server/**'
+      - 'Dockerfile.server'
+      - '.github/workflows/deploy-server.yml'
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}/happy-server
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    environment: deployment
+
+    permissions:
+      contents: read
+      packages: write
+
+    outputs:
+      image: ${{ steps.image.outputs.image }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=sha,prefix=
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile.server
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+      - name: Output image
+        id: image
+        run: echo "image=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.ref_name }}" >> $GITHUB_OUTPUT
+
+  deploy:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    environment: deployment
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Copy docker-compose to server
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          source: "packages/happy-server/deploy/docker-compose.yaml"
+          target: "~/happy"
+          strip_components: 3
+
+      - name: Deploy to server
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          script: |
+            set -e
+            cd ~/happy
+
+            echo "🚀 Starting deployment of Happy Server..."
+
+            # Login to GitHub Container Registry
+            echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+            # Create .env file
+            cat > .env <<EOF
+            SERVER_IMAGE=${{ secrets.SERVER_IMAGE }}
+            API_DOMAIN=${{ secrets.API_DOMAIN }}
+            S3_DOMAIN=${{ secrets.S3_DOMAIN }}
+            S3_PUBLIC_URL=https://${{ secrets.S3_DOMAIN }}/happy
+            POSTGRES_PASSWORD=${{ secrets.POSTGRES_PASSWORD }}
+            HANDY_MASTER_SECRET=${{ secrets.HANDY_MASTER_SECRET }}
+            S3_ACCESS_KEY=${{ secrets.S3_ACCESS_KEY }}
+            S3_SECRET_KEY=${{ secrets.S3_SECRET_KEY }}
+            TRAEFIK_NETWORK=${{ secrets.DOCKER_NETWORK }}
+            EOF
+            sed -i 's/^[[:space:]]*//' .env
+
+            # Pull and deploy (--no-build ensures we use the pre-built image from ghcr.io)
+            echo "⬇️ Pulling images..."
+            docker compose pull
+
+            echo "🔄 Starting services..."
+            docker compose up -d --no-build
+
+            # Wait for services to be ready
+            echo "⏳ Waiting for services to be ready..."
+            sleep 15
+
+            # Check status
+            echo "📋 Service status:"
+            docker compose ps
+
+            echo "📋 Server logs:"
+            docker compose logs --tail 20 server
+
+            echo "🎉 Deployment completed!"
+            echo "📍 API available at: https://${{ secrets.API_DOMAIN }}"
