@@ -2,7 +2,7 @@ name: Deploy Server
 
 on:
   push:
-    branches: [main]
+    branches: [main, prod]
     paths:
       - 'packages/happy-server/**'
       - 'Dockerfile.server'
